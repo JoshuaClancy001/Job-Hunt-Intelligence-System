@@ -7,7 +7,7 @@ export interface Job {
   location: string;
   url: string;
   remote: boolean;
-  experience_years: number;
+  experience_years: number | null;
   salary_min: number;
   salary_max: number;
   skills: string[];
@@ -37,9 +37,13 @@ export interface Application {
   cover_letter: string;
   resume_bullets: string[];
   updated_at: string;
+  rejection_reason: string;
   title?: string;
   company?: string;
   fit_score?: number | null;
+  salary_min?: number;
+  salary_max?: number;
+  url?: string;
 }
 
 export interface InsightReport {
@@ -70,6 +74,19 @@ async function req<T>(path: string, options?: RequestInit): Promise<T> {
 
 export const api = {
   getJobs: () => req<Job[]>("/jobs"),
+  deleteJob: (id: number) => req<{ deleted: number }>(`/jobs/${id}`, { method: "DELETE" }),
+  updateJob: (id: number, data: Partial<Job>) =>
+    req<Job>(`/jobs/${id}`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
+  addJobManually: (data: { title: string; company: string; description: string; location?: string; url?: string }) =>
+    req<Job>("/jobs/add", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(data),
+    }),
   getJob: (id: number) => req<Job>(`/jobs/${id}`),
   scrapeJob: (url: string) =>
     req<Job>("/jobs/scrape", {
@@ -92,15 +109,18 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ job_id, status, notes }),
     }),
-  updateApplication: (id: number, status: string, notes: string) =>
+  updateApplication: (id: number, status: string, notes: string, rejection_reason = "") =>
     req<Application>(`/applications/${id}`, {
       method: "PUT",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status, notes }),
+      body: JSON.stringify({ status, notes, rejection_reason }),
     }),
+  getApplicationHistory: (id: number) =>
+    req<{ status: string; changed_at: string }[]>(`/applications/${id}/history`),
 
   getInsights: () => req<InsightReport>("/insights"),
   getProfile: () => req<Record<string, unknown>>("/profile"),
+  reloadProfileFromFile: () => req<Record<string, unknown>>("/profile/reload", { method: "POST" }),
   updateProfile: (data: Record<string, unknown>) =>
     req<Record<string, unknown>>("/profile", {
       method: "PUT",

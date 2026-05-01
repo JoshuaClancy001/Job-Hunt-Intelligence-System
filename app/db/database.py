@@ -36,14 +36,22 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         );
 
         CREATE TABLE IF NOT EXISTS applications (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id           INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
+            status           TEXT DEFAULT 'saved',
+            applied_at       TEXT DEFAULT NULL,
+            notes            TEXT DEFAULT '',
+            cover_letter     TEXT DEFAULT '',
+            resume_bullets   TEXT DEFAULT '[]',
+            updated_at       TEXT DEFAULT (datetime('now')),
+            rejection_reason TEXT DEFAULT ''
+        );
+
+        CREATE TABLE IF NOT EXISTS status_history (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
-            job_id         INTEGER NOT NULL REFERENCES jobs(id) ON DELETE CASCADE,
-            status         TEXT DEFAULT 'saved',
-            applied_at     TEXT DEFAULT NULL,
-            notes          TEXT DEFAULT '',
-            cover_letter   TEXT DEFAULT '',
-            resume_bullets TEXT DEFAULT '[]',
-            updated_at     TEXT DEFAULT (datetime('now'))
+            application_id INTEGER NOT NULL REFERENCES applications(id) ON DELETE CASCADE,
+            status         TEXT NOT NULL,
+            changed_at     TEXT DEFAULT (datetime('now'))
         );
 
         CREATE TABLE IF NOT EXISTS candidate_profile (
@@ -58,6 +66,15 @@ def _create_tables(conn: sqlite3.Connection) -> None:
         );
     """)
     conn.commit()
+    # Migrations — safe to re-run; ALTER TABLE fails silently if column exists
+    for migration in [
+        "ALTER TABLE applications ADD COLUMN rejection_reason TEXT DEFAULT ''",
+    ]:
+        try:
+            conn.execute(migration)
+            conn.commit()
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
@@ -90,6 +107,11 @@ def insert_job(conn: sqlite3.Connection, job: dict) -> int:
     return cur.lastrowid
 
 
+def delete_job(conn: sqlite3.Connection, job_id: int) -> None:
+    conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
+    conn.commit()
+
+
 def update_job_scores(conn: sqlite3.Connection, job_id: int,
                       fit_score: float, fit_breakdown: dict) -> None:
     conn.execute(
@@ -112,10 +134,37 @@ def update_job_parsed_fields(conn: sqlite3.Connection, job_id: int, fields: dict
         """,
         (
             skills,
-            fields.get("experience_years", 0),
+            fields.get("experience_years"),  # None stored as NULL = "not specified"
             fields.get("salary_min", 0),
             fields.get("salary_max", 0),
             1 if fields.get("remote") else 0,
+            job_id,
+        ),
+    )
+    conn.commit()
+
+
+def update_job(conn: sqlite3.Connection, job_id: int, fields: dict) -> None:
+    skills = fields.get("skills", [])
+    if not isinstance(skills, str):
+        skills = json.dumps(skills)
+    conn.execute(
+        """
+        UPDATE jobs
+        SET title=?, company=?, location=?, url=?, remote=?,
+            salary_min=?, salary_max=?, experience_years=?, skills=?
+        WHERE id=?
+        """,
+        (
+            fields.get("title", ""),
+            fields.get("company", ""),
+            fields.get("location", ""),
+            fields.get("url", ""),
+            1 if fields.get("remote") else 0,
+            fields.get("salary_min", 0),
+            fields.get("salary_max", 0),
+            fields.get("experience_years", 0),
+            skills,
             job_id,
         ),
     )
@@ -140,31 +189,59 @@ def insert_application(conn: sqlite3.Connection, app: dict) -> int:
     bullets = app.get("resume_bullets", [])
     if not isinstance(bullets, str):
         bullets = json.dumps(bullets)
+    status = app.get("status", "saved")
     cur = conn.execute(
         """
-        INSERT INTO applications (job_id, status, applied_at, notes, cover_letter, resume_bullets)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO applications
+            (job_id, status, applied_at, notes, cover_letter, resume_bullets, rejection_reason)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
         (
             app["job_id"],
-            app.get("status", "saved"),
+            status,
             app.get("applied_at"),
             app.get("notes", ""),
             app.get("cover_letter", ""),
             bullets,
+            app.get("rejection_reason", ""),
         ),
     )
+    app_id = cur.lastrowid
+    conn.execute(
+        "INSERT INTO status_history (application_id, status) VALUES (?, ?)",
+        (app_id, status),
+    )
     conn.commit()
-    return cur.lastrowid
+    return app_id
 
 
 def update_application_status(conn: sqlite3.Connection, app_id: int,
-                               status: str, notes: str = "") -> None:
+                               status: str, notes: str = "",
+                               rejection_reason: str = "") -> None:
     conn.execute(
-        "UPDATE applications SET status=?, notes=?, updated_at=datetime('now') WHERE id=?",
-        (status, notes, app_id),
+        """
+        UPDATE applications
+        SET status=?, notes=?, updated_at=datetime('now'),
+            rejection_reason=?,
+            applied_at=CASE WHEN ? = 'applied' AND applied_at IS NULL
+                            THEN datetime('now') ELSE applied_at END
+        WHERE id=?
+        """,
+        (status, notes, rejection_reason, status, app_id),
+    )
+    conn.execute(
+        "INSERT INTO status_history (application_id, status) VALUES (?, ?)",
+        (app_id, status),
     )
     conn.commit()
+
+
+def get_status_history(conn: sqlite3.Connection, app_id: int) -> list[dict]:
+    rows = conn.execute(
+        "SELECT status, changed_at FROM status_history WHERE application_id=? ORDER BY id ASC",
+        (app_id,),
+    ).fetchall()
+    return [dict(r) for r in rows]
 
 
 def get_application_for_job(conn: sqlite3.Connection, job_id: int) -> Optional[dict]:
@@ -177,10 +254,10 @@ def get_application_for_job(conn: sqlite3.Connection, job_id: int) -> Optional[d
 def get_all_applications(conn: sqlite3.Connection) -> list[dict]:
     rows = conn.execute(
         """
-        SELECT a.*, j.title, j.company, j.fit_score
+        SELECT a.*, j.title, j.company, j.fit_score, j.salary_min, j.salary_max, j.url
         FROM applications a
         JOIN jobs j ON j.id = a.job_id
-        ORDER BY a.updated_at DESC
+        ORDER BY a.applied_at DESC NULLS LAST, a.updated_at DESC
         """
     ).fetchall()
     return [_deserialize_row(r) for r in rows]

@@ -7,11 +7,21 @@ const STATUS_COLORS: Record<string, string> = {
   rejected: "bg-red-50 text-red-600 ring-red-200",
 };
 
+const STATUS_LABELS: Record<string, string> = {
+  saved:    "Saved",
+  applied:  "Applied",
+  phone:    "Interviewing",
+  onsite:   "Onsite",
+  offer:    "Offer",
+  rejected: "Rejected",
+};
+
 export function StatusBadge({ status }: { status: string }) {
   const color = STATUS_COLORS[status] || STATUS_COLORS.saved;
+  const label = STATUS_LABELS[status] ?? status;
   return (
-    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ring-1 capitalize ${color}`}>
-      {status}
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ring-1 ${color}`}>
+      {label}
     </span>
   );
 }

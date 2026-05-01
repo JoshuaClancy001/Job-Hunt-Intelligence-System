@@ -99,12 +99,12 @@ def _extract_skills(text: str) -> list[str]:
     return result
 
 
-def _extract_experience(text: str) -> float:
+def _extract_experience(text: str) -> Optional[float]:
     for pat in _RE_EXP:
         m = pat.search(text)
         if m:
             return float(m.group(1))
-    return 0.0
+    return None
 
 
 def _extract_salary(text: str) -> tuple[int, int]:
@@ -133,7 +133,13 @@ def _parse_ollama(text: str, title: str = "") -> Optional[dict]:
     prompt = f"""Extract structured information from this job posting.
 Return ONLY valid JSON with these exact keys:
 {{"skills": ["list", "of", "required", "skills"], "experience_years": 3, "salary_min": 120000, "salary_max": 160000, "remote": true}}
-If information is not present use 0 for numbers, false for booleans, [] for arrays. No explanation, only JSON.
+
+Rules:
+- skills: list every technical skill, tool, or language explicitly mentioned.
+- experience_years: ONLY include a number if the posting EXPLICITLY states a required number of years (e.g. "3+ years", "minimum 5 years"). Do NOT infer from words like "senior" or "junior". Use null if no specific number is stated.
+- salary_min / salary_max: extract only if dollar amounts appear. Use 0 if absent.
+- remote: true only if the posting says remote, WFH, or distributed. false otherwise.
+- No explanation. No markdown. Only the JSON object.
 
 Job Title: {title}
 Description:
@@ -149,7 +155,11 @@ Description:
         raw = resp.json().get("response", "")
         m = re.search(r"\{.*\}", raw, re.DOTALL)
         if m:
-            return json.loads(m.group())
+            parsed = json.loads(m.group())
+            # Normalize: null/0/missing all mean "not specified" for experience
+            if not parsed.get("experience_years"):
+                parsed["experience_years"] = None
+            return parsed
     except Exception:
         pass
     return None

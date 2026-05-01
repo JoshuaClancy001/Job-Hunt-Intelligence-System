@@ -5,11 +5,13 @@ Job Hunt Intelligence System — CLI
 Commands:
   demo        Load sample data and run the full pipeline
   scrape      Scrape a job posting URL
+  add         Manually add a job (paste description, no URL needed)
   analyze     Parse and score all jobs
   apply       Track or update an application status
   insights    Show application funnel and metrics
   generate    Generate a cover letter or resume bullets
   profile     Show or load the candidate profile
+  list        List all jobs in the database
 """
 
 import json

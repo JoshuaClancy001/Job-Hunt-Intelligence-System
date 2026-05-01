@@ -4,6 +4,7 @@ import { Dashboard } from "./pages/Dashboard";
 import { Jobs } from "./pages/Jobs";
 import { Applications } from "./pages/Applications";
 import { Insights } from "./pages/Insights";
+import { Profile } from "./pages/Profile";
 
 export default function App() {
   return (
@@ -14,6 +15,7 @@ export default function App() {
           <Route path="/jobs" element={<Jobs />} />
           <Route path="/applications" element={<Applications />} />
           <Route path="/insights" element={<Insights />} />
+          <Route path="/profile" element={<Profile />} />
         </Routes>
       </Layout>
     </BrowserRouter>

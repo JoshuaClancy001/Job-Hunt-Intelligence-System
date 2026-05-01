@@ -20,7 +20,8 @@ from pathlib import Path
 from app.db.database import (
     get_connection, get_all_jobs, get_job_by_id, get_or_create_profile,
     save_profile, get_all_applications, insert_application,
-    update_application_status, get_application_for_job,
+    update_application_status, get_application_for_job, delete_job,
+    get_status_history, update_job,
 )
 
 app = FastAPI(
@@ -44,6 +45,13 @@ app.add_middleware(
 class ScrapeRequest(BaseModel):
     url: str
 
+class ManualJobRequest(BaseModel):
+    title: str
+    company: str
+    description: str
+    location: str = ""
+    url: str = ""
+
 class ApplicationCreate(BaseModel):
     job_id: int
     status: str = "saved"
@@ -52,6 +60,19 @@ class ApplicationCreate(BaseModel):
 class ApplicationUpdate(BaseModel):
     status: str
     notes: str = ""
+    rejection_reason: str = ""
+
+class JobUpdate(BaseModel):
+    title: Optional[str] = None
+    company: Optional[str] = None
+    location: Optional[str] = None
+    url: Optional[str] = None
+    remote: Optional[bool] = None
+    salary_min: Optional[int] = None
+    salary_max: Optional[int] = None
+    experience_years: Optional[float] = None
+    skills: Optional[list[str]] = None
+
 
 class GenerateRequest(BaseModel):
     content_type: str = "cover-letter"
@@ -103,6 +124,53 @@ def scrape_job(req: ScrapeRequest):
     return get_job_by_id(conn, job_id)
 
 
+@app.post("/jobs/add")
+def add_job_manually(req: ManualJobRequest):
+    from app.agents.parser import parse_text
+    from app.agents.fit_scorer import run as score_job
+    from app.db.database import insert_job
+
+    conn = get_connection()
+    parsed = parse_text(req.description, req.title)
+
+    job_id = insert_job(conn, {
+        "title": req.title,
+        "company": req.company,
+        "location": req.location,
+        "url": req.url,
+        "raw_description": req.description,
+        "skills": parsed.get("skills", []),
+        "experience_years": parsed.get("experience_years", 0),
+        "salary_min": parsed.get("salary_min", 0),
+        "salary_max": parsed.get("salary_max", 0),
+        "remote": parsed.get("remote", False),
+    })
+    conn.execute("UPDATE jobs SET parsed_at=datetime('now') WHERE id=?", (job_id,))
+    conn.commit()
+    score_job(conn, job_id)
+    return get_job_by_id(conn, job_id)
+
+
+@app.put("/jobs/{job_id}")
+def update_job_endpoint(job_id: int, req: JobUpdate):
+    conn = get_connection()
+    existing = get_job_by_id(conn, job_id)
+    if not existing:
+        raise HTTPException(404, "Job not found")
+    merged = {**existing, **{k: v for k, v in req.model_dump().items() if v is not None}}
+    update_job(conn, job_id, merged)
+    return get_job_by_id(conn, job_id)
+
+
+@app.delete("/jobs/{job_id}")
+def delete_job_endpoint(job_id: int):
+    conn = get_connection()
+    if not get_job_by_id(conn, job_id):
+        raise HTTPException(404, "Job not found")
+    delete_job(conn, job_id)
+    return {"deleted": job_id}
+
+
 @app.post("/jobs/{job_id}/score")
 def score_job_endpoint(job_id: int):
     from app.agents.fit_scorer import run as score_job
@@ -142,14 +210,34 @@ def create_application(req: ApplicationCreate):
 
 @app.put("/applications/{app_id}")
 def update_application(app_id: int, req: ApplicationUpdate):
-    update_application_status(get_connection(), app_id, req.status, req.notes)
+    update_application_status(get_connection(), app_id, req.status, req.notes, req.rejection_reason)
     return {"id": app_id, "status": req.status}
+
+
+@app.get("/applications/{app_id}/history")
+def get_application_history(app_id: int):
+    return get_status_history(get_connection(), app_id)
 
 
 @app.get("/insights")
 def get_insights():
     from app.agents.insights import run as compute_insights
     return compute_insights(get_connection()).model_dump()
+
+
+@app.post("/profile/reload")
+def reload_profile_from_file():
+    """Load profile.json from disk into the database."""
+    import json
+    from pathlib import Path
+    profile_path = Path(__file__).parent / "profile.json"
+    if not profile_path.exists():
+        raise HTTPException(404, "profile.json not found")
+    with open(profile_path) as f:
+        data = json.load(f)
+    conn = get_connection()
+    save_profile(conn, data)
+    return get_or_create_profile(conn)
 
 
 @app.get("/profile")

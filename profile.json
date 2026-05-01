@@ -1,30 +1,50 @@
 {
-  "name": "Your Name Here",
+  "name": "Joshua Clancy",
   "skills": [
     "python",
-    "fastapi",
-    "postgresql",
-    "redis",
-    "docker",
-    "aws",
-    "react",
     "typescript",
+    "javascript",
+    "java",
+    "go",
+    "node.js",
+    "react",
+    "vue",
+    "html",
+    "css",
     "rest api",
     "system design",
+    "postgresql",
+    "mysql",
+    "mongodb",
+    "dynamodb",
+    "aws",
+    "linux",
     "git",
-    "linux"
+    "agile",
+    "react native",
+    "flutter",
+    "grafana",
+    "datadog",
+    "supabase"
   ],
-  "experience_years": 5,
+  "experience_years": 1,
   "preferred_roles": [
-    "backend engineer",
     "software engineer",
-    "python developer"
+    "junior software engineer",
+    "entry level software engineer",
+    "associate software engineer",
+    "full stack engineer",
+    "frontend engineer",
+    "backend engineer",
+    "full stack developer",
+    "software developer",
+    "junior developer",
+    "new grad software engineer"
   ],
   "preferred_locations": [
     "Remote",
-    "San Francisco",
-    "New York"
+    "Provo"
   ],
-  "min_salary": 130000,
-  "summary": "Backend engineer with experience building scalable APIs and distributed systems. Seeking senior IC or tech lead roles."
+  "min_salary": 80000,
+  "summary": "Versatile full-stack software engineer graduated April 2026 with experience across TypeScript, Python, React, and Node.js. Track record of shipping user-facing features and measuring impact in fast-moving Agile environments. Strong communicator who moves quickly, iterates confidently, and uses AI-assisted development tools to deliver value fast. Seeking a growth engineering role where I can experiment, build, and learn quickly."
 }
