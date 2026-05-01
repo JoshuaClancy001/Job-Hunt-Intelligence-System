@@ -1,0 +1,30 @@
+{
+  "name": "Your Name Here",
+  "skills": [
+    "python",
+    "fastapi",
+    "postgresql",
+    "redis",
+    "docker",
+    "aws",
+    "react",
+    "typescript",
+    "rest api",
+    "system design",
+    "git",
+    "linux"
+  ],
+  "experience_years": 5,
+  "preferred_roles": [
+    "backend engineer",
+    "software engineer",
+    "python developer"
+  ],
+  "preferred_locations": [
+    "Remote",
+    "San Francisco",
+    "New York"
+  ],
+  "min_salary": 130000,
+  "summary": "Backend engineer with experience building scalable APIs and distributed systems. Seeking senior IC or tech lead roles."
+}
