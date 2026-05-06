@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
-import { api, Job, GeneratedContent } from "../lib/api";
+import { api, Job } from "../lib/api";
 import { ScoreBadge } from "../components/ScoreBadge";
-import { TagInput } from "../components/TagInput";
+import { JobDrawer } from "../components/JobDrawer";
 
 function fmtSalary(min: number, max: number): string {
   if (!min && !max) return "—";
@@ -18,10 +18,7 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
-  // URL tab
   const [scrapeUrl, setScrapeUrl] = useState("");
-
-  // Manual tab
   const [title, setTitle] = useState("");
   const [company, setCompany] = useState("");
   const [location, setLocation] = useState("");
@@ -37,7 +34,9 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
       onAdded();
       onClose();
     } catch (e) {
-      setError("Scrape failed: " + (e as Error).message);
+      const msg = (e as Error).message;
+      // 422 = filtered out by profile rules — show as amber warning, not red error
+      setError(msg.includes("422") ? "Filtered: " + msg.split("422:")[1]?.trim() : "Scrape failed: " + msg);
     } finally {
       setLoading(false);
     }
@@ -55,7 +54,8 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
       onAdded();
       onClose();
     } catch (e) {
-      setError("Failed to add job: " + (e as Error).message);
+      const msg = (e as Error).message;
+      setError(msg.includes("422") ? "Filtered: " + msg.split("422:")[1]?.trim() : "Failed to add job: " + msg);
     } finally {
       setLoading(false);
     }
@@ -65,13 +65,11 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       <div className="fixed inset-0 bg-black/30" onClick={onClose} />
       <div className="relative bg-white rounded-xl shadow-2xl w-full max-w-lg border border-gray-200">
-        {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
           <h2 className="text-base font-semibold text-gray-900">Add Job</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">×</button>
         </div>
 
-        {/* Tabs */}
         <div className="flex border-b border-gray-200">
           {(["url", "manual"] as const).map(t => (
             <button
@@ -96,14 +94,14 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
                 <input
                   autoFocus
                   className="w-full bg-white border border-gray-300 rounded-md px-3 py-2 text-sm text-gray-900 placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-indigo-300 focus:border-indigo-400"
-                  placeholder="https://jobs.lever.co/company/... or boards.greenhouse.io/..."
+                  placeholder="https://jobs.lever.co/company/..."
                   value={scrapeUrl}
                   onChange={e => setScrapeUrl(e.target.value)}
                   onKeyDown={e => e.key === "Enter" && handleScrape()}
                 />
               </div>
               <p className="text-xs text-gray-400">
-                Works best with Greenhouse, Lever, and Ashby job postings. Title, company, and description are extracted automatically, then scored against your profile.
+                Works best with Greenhouse, Lever, and Ashby job postings.
               </p>
             </>
           ) : (
@@ -157,7 +155,7 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
                 <textarea
                   className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300 resize-none font-mono"
                   rows={8}
-                  placeholder="Paste the full job description here. Skills, salary, experience requirements, and remote status will be extracted automatically..."
+                  placeholder="Paste the full job description here..."
                   value={description}
                   onChange={e => setDescription(e.target.value)}
                 />
@@ -166,7 +164,11 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
           )}
 
           {error && (
-            <p className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">{error}</p>
+            <p className={`text-sm border rounded px-3 py-2 ${
+              error.startsWith("Filtered:")
+                ? "text-amber-700 bg-amber-50 border-amber-200"
+                : "text-red-600 bg-red-50 border-red-200"
+            }`}>{error}</p>
           )}
 
           <div className="flex justify-end gap-2 pt-1">
@@ -189,143 +191,180 @@ function AddJobModal({ onClose, onAdded }: { onClose: () => void; onAdded: () =>
 }
 
 // ---------------------------------------------------------------------------
-// Main Jobs page
+// New Jobs page — jobs with no application yet
 // ---------------------------------------------------------------------------
 
-export function Jobs() {
+const SENIOR_RE = /\b(senior|sr\.?|principal|staff|lead|director|vp|vice\s+president|head\s+of|manager|architect|distinguished|fellow)\b/i;
+
+type LocationFilter = "any" | "remote_utah" | "remote";
+
+function ls<T>(key: string, fallback: T): T {
+  try { const v = localStorage.getItem(key); return v !== null ? JSON.parse(v) : fallback; }
+  catch { return fallback; }
+}
+
+export function NewJobs() {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Job | null>(null);
-  const [minScore, setMinScore] = useState(0);
-  const [remoteOnly, setRemoteOnly] = useState(false);
-  const [generating, setGenerating] = useState(false);
-  const [generated, setGenerated] = useState<GeneratedContent | null>(null);
   const [showAddModal, setShowAddModal] = useState(false);
-  const [trackStatus, setTrackStatus] = useState("applied");
-  const [deleting, setDeleting] = useState(false);
-  const [editing, setEditing] = useState(false);
-  const [editDraft, setEditDraft] = useState<Partial<Job>>({});
-  const [saving, setSaving] = useState(false);
-  const [rescoring, setRescoring] = useState(false);
+  const [discovering, setDiscovering] = useState(false);
+  const [discoveryMsg, setDiscoveryMsg] = useState("");
+  const [discoverySource, setDiscoverySource] = useState<string>("all");
+
+  // Filters — persisted to localStorage
+  const [minScore,      setMinScore]      = useState<number>(() => ls("nj_minscore", 0));
+  const [locationFilter, setLocationFilter] = useState<LocationFilter>(() => ls("nj_location", "remote_utah"));
+  const [hideSenior,    setHideSenior]    = useState<boolean>(() => ls("nj_hidesenior", true));
+
+  const save = (key: string, val: unknown) => localStorage.setItem(key, JSON.stringify(val));
 
   const load = () => api.getJobs().then(setJobs).finally(() => setLoading(false));
   useEffect(() => { load(); }, []);
 
-  const startEdit = (job: Job) => {
-    setEditDraft({ ...job });
-    setEditing(true);
-    setGenerated(null);
+  const SOURCE_LABELS: Record<string, string> = {
+    all: "All Sources", linkedin: "LinkedIn", indeed: "Indeed",
+    remotive: "Remotive", remoteok: "RemoteOK", wwr: "We Work Remotely", arbeitnow: "Arbeitnow",
   };
 
-  const cancelEdit = () => { setEditing(false); setEditDraft({}); };
-
-  const handleSave = async () => {
-    if (!selected) return;
-    setSaving(true);
+  const handleDiscover = async () => {
+    setDiscovering(true);
+    const label = SOURCE_LABELS[discoverySource] ?? discoverySource;
+    setDiscoveryMsg(`Searching ${label}…`);
     try {
-      const updated = await api.updateJob(selected.id, editDraft);
-      setSelected(updated);
-      load();
-      setEditing(false);
+      const result = await api.discoverJobs(discoverySource === "all" ? undefined : discoverySource);
+      setDiscoveryMsg(`Found ${result.new} new job${result.new !== 1 ? "s" : ""} — ${result.sources.join(", ")}`);
+      if (result.new > 0) load();
+      setTimeout(() => setDiscoveryMsg(""), 8000);
+    } catch (e) {
+      setDiscoveryMsg("Discovery failed: " + (e as Error).message);
+      setTimeout(() => setDiscoveryMsg(""), 5000);
     } finally {
-      setSaving(false);
+      setDiscovering(false);
     }
   };
 
-  const handleSaveAndRescore = async () => {
-    if (!selected) return;
-    setSaving(true);
-    try {
-      const updated = await api.updateJob(selected.id, editDraft);
-      setSelected(updated);
-      load();
-      setEditing(false);
-      setRescoring(true);
-      const scored = await api.scoreJob(selected.id);
-      setSelected(prev => prev ? { ...prev, fit_score: scored.fit_score, fit_breakdown: scored.breakdown } : prev);
-      load();
-    } finally {
-      setSaving(false);
-      setRescoring(false);
-    }
+  const isUtah = (j: Job) => {
+    const loc = (j.location || "").toLowerCase();
+    return loc.includes("utah") || loc.includes(" ut") || loc.includes(",ut") ||
+           loc.includes("provo") || loc.includes("salt lake") || loc.includes("orem");
   };
 
-  const filtered = jobs.filter(j =>
-    (j.fit_score ?? 0) >= minScore && (!remoteOnly || j.remote)
-  );
+  // Only show jobs with no application at all + user filters
+  const filtered = jobs.filter(j => {
+    if (j.application_status) return false;
+    if ((j.fit_score ?? 0) < minScore) return false;
+    if (locationFilter === "remote" && !j.remote) return false;
+    if (locationFilter === "remote_utah" && !j.remote && !isUtah(j)) return false;
+    if (hideSenior && SENIOR_RE.test(j.title)) return false;
+    return true;
+  });
 
-  const handleGenerate = async (job: Job) => {
-    setGenerating(true);
-    setGenerated(null);
-    try {
-      const result = await api.generateContent(job.id, "both");
-      setGenerated(result);
-    } finally {
-      setGenerating(false);
-    }
-  };
-
-  const handleDelete = async (job: Job) => {
-    if (!confirm(`Delete "${job.title}" at ${job.company}? This cannot be undone.`)) return;
-    setDeleting(true);
-    try {
-      await api.deleteJob(job.id);
-      setSelected(null);
-      load();
-    } finally {
-      setDeleting(false);
-    }
-  };
-
-  const handleTrack = async (job: Job) => {
-    try {
-      await api.createApplication(job.id, trackStatus, "");
-      alert(`Tracked "${job.title}" as "${trackStatus}"`);
-    } catch {
-      alert("Already tracked — use the Applications page to update status.");
-    }
-  };
+  const activeFilters = (locationFilter !== "any" ? 1 : 0) + (hideSenior ? 1 : 0) + (minScore > 0 ? 1 : 0);
 
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
         <h2 className="text-xl font-semibold text-gray-900">
-          Jobs <span className="text-gray-400 text-base font-normal">({filtered.length})</span>
+          New Jobs <span className="text-gray-400 text-base font-normal">({filtered.length})</span>
         </h2>
-        <button
-          onClick={() => setShowAddModal(true)}
-          className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-md font-medium transition-colors"
-        >
-          + Add Job
-        </button>
+        <div className="flex items-center gap-2">
+          <div className="flex rounded-md shadow-sm">
+            <select
+              value={discoverySource}
+              onChange={e => setDiscoverySource(e.target.value)}
+              disabled={discovering}
+              className="border border-gray-300 border-r-0 rounded-l-md text-sm text-gray-700 bg-white px-2 py-2 focus:outline-none focus:ring-1 focus:ring-indigo-500 disabled:opacity-50"
+            >
+              {Object.entries(SOURCE_LABELS).map(([val, label]) => (
+                <option key={val} value={val}>{label}</option>
+              ))}
+            </select>
+            <button
+              onClick={handleDiscover}
+              disabled={discovering}
+              className="bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 text-gray-700 text-sm px-3 py-2 rounded-r-md font-medium transition-colors flex items-center gap-1.5"
+            >
+              {discovering
+                ? <><span className="animate-spin inline-block">↻</span> Searching…</>
+                : "↻ Search"}
+            </button>
+          </div>
+          <button
+            onClick={() => setShowAddModal(true)}
+            className="bg-indigo-600 hover:bg-indigo-700 text-white text-sm px-4 py-2 rounded-md font-medium transition-colors"
+          >
+            + Add Job
+          </button>
+        </div>
       </div>
 
-      {/* Filters */}
-      <div className="flex items-center gap-6 text-sm bg-white border border-gray-200 rounded-md px-4 py-2.5 shadow-sm">
-        <label className="flex items-center gap-2 text-gray-600">
-          Min score:
-          <span className="text-indigo-600 font-semibold w-6">{minScore}</span>
-          <input type="range" min={0} max={100} step={10} value={minScore}
-            onChange={e => setMinScore(+e.target.value)}
-            className="w-28 accent-indigo-600" />
-        </label>
-        <label className="flex items-center gap-2 text-gray-600 cursor-pointer select-none">
-          <input type="checkbox" checked={remoteOnly} onChange={e => setRemoteOnly(e.target.checked)}
-            className="accent-indigo-600" />
-          Remote only
-        </label>
+      {discoveryMsg && (
+        <div className="bg-indigo-50 border border-indigo-200 rounded-md px-4 py-2.5 text-sm text-indigo-700">
+          {discoveryMsg}
+        </div>
+      )}
+
+      {/* Filter bar */}
+      <div className="bg-white border border-gray-200 rounded-md shadow-sm">
+        <div className="flex items-center gap-1 px-3 py-2 border-b border-gray-100">
+          <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Filters</span>
+          {activeFilters > 0 && (
+            <span className="ml-1 bg-indigo-100 text-indigo-700 text-xs font-semibold px-1.5 py-0.5 rounded-full">
+              {activeFilters} active
+            </span>
+          )}
+        </div>
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-4 py-3 text-sm">
+
+          {/* Min score */}
+          <label className="flex items-center gap-2 text-gray-600">
+            Min score:
+            <span className="text-indigo-600 font-semibold w-6">{minScore}</span>
+            <input type="range" min={0} max={100} step={10} value={minScore}
+              onChange={e => { const v = +e.target.value; setMinScore(v); save("nj_minscore", v); }}
+              className="w-28 accent-indigo-600" />
+          </label>
+
+          {/* Location */}
+          <div className="flex items-center gap-2 text-gray-600">
+            <span>Location:</span>
+            <div className="flex rounded-md border border-gray-300 overflow-hidden text-xs font-medium">
+              {([ ["any", "Any"], ["remote_utah", "Remote / Utah"], ["remote", "Remote only"] ] as [LocationFilter, string][]).map(([val, label]) => (
+                <button
+                  key={val}
+                  onClick={() => { setLocationFilter(val); save("nj_location", val); }}
+                  className={`px-2.5 py-1.5 transition-colors border-r last:border-r-0 border-gray-300 ${
+                    locationFilter === val
+                      ? "bg-indigo-600 text-white"
+                      : "bg-white text-gray-600 hover:bg-gray-50"
+                  }`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Hide senior */}
+          <label className="flex items-center gap-2 text-gray-600 cursor-pointer select-none">
+            <input type="checkbox" checked={hideSenior}
+              onChange={e => { setHideSenior(e.target.checked); save("nj_hidesenior", e.target.checked); }}
+              className="accent-indigo-600" />
+            Hide senior / lead roles
+          </label>
+
+        </div>
       </div>
 
-      {/* Table */}
       {loading ? (
         <p className="text-gray-400 animate-pulse">Loading...</p>
       ) : (
         <div className="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
           {filtered.length === 0 ? (
             <div className="py-16 text-center text-gray-400">
-              <p className="text-lg font-medium text-gray-500">No jobs yet</p>
-              <p className="text-sm mt-1">Click <strong>+ Add Job</strong> to scrape a URL or paste a job description</p>
+              <p className="text-lg font-medium text-gray-500">No new jobs</p>
+              <p className="text-sm mt-1">Click <strong>+ Add Job</strong> to add one, or <strong>↻ Find New Jobs</strong> to search automatically</p>
             </div>
           ) : (
             <table className="w-full text-sm">
@@ -343,7 +382,7 @@ export function Jobs() {
                 {filtered.map(job => (
                   <tr
                     key={job.id}
-                    onClick={() => { setSelected(job); setGenerated(null); }}
+                    onClick={() => setSelected(job)}
                     className={`cursor-pointer transition-colors ${
                       selected?.id === job.id ? "bg-indigo-50" : "hover:bg-gray-50"
                     }`}
@@ -366,250 +405,12 @@ export function Jobs() {
         </div>
       )}
 
-      {/* Detail drawer */}
       {selected && (
-        <>
-          <div className="fixed inset-0 bg-black/20 z-40" onClick={() => { setSelected(null); cancelEdit(); }} />
-          <div className="fixed inset-y-0 right-0 w-[500px] bg-white border-l border-gray-200 shadow-xl overflow-y-auto z-50">
-            <div className="p-5 space-y-4">
-
-              {/* Drawer header */}
-              <div className="flex justify-between items-start">
-                <div className="flex-1 min-w-0 pr-2">
-                  <h3 className="text-lg font-semibold text-gray-900 leading-snug">{selected.title}</h3>
-                  <p className="text-gray-500 text-sm">{selected.company}{selected.location ? ` · ${selected.location}` : ""}</p>
-                </div>
-                <div className="flex items-center gap-1 flex-shrink-0">
-                  {!editing && (
-                    <button onClick={() => startEdit(selected)}
-                      className="text-xs text-indigo-600 hover:text-indigo-800 hover:bg-indigo-50 px-2 py-1 rounded transition-colors font-medium">
-                      Edit
-                    </button>
-                  )}
-                  <button
-                    onClick={() => handleDelete(selected)}
-                    disabled={deleting}
-                    className="text-xs text-red-400 hover:text-red-600 hover:bg-red-50 px-2 py-1 rounded transition-colors disabled:opacity-50"
-                  >
-                    {deleting ? "…" : "Delete"}
-                  </button>
-                  <button onClick={() => { setSelected(null); cancelEdit(); }}
-                    className="text-gray-400 hover:text-gray-600 text-xl leading-none p-1">×</button>
-                </div>
-              </div>
-
-              {editing ? (
-                /* ── Edit form ── */
-                <div className="space-y-4">
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Title</label>
-                      <input value={editDraft.title ?? ""} onChange={e => setEditDraft(d => ({ ...d, title: e.target.value }))}
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Company</label>
-                      <input value={editDraft.company ?? ""} onChange={e => setEditDraft(d => ({ ...d, company: e.target.value }))}
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Location</label>
-                      <input value={editDraft.location ?? ""} onChange={e => setEditDraft(d => ({ ...d, location: e.target.value }))}
-                        placeholder="Remote, New York, etc."
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                    </div>
-                    <div className="flex items-end pb-0.5">
-                      <label className="flex items-center gap-2 text-sm text-gray-700 cursor-pointer select-none">
-                        <input type="checkbox" checked={editDraft.remote ?? false}
-                          onChange={e => setEditDraft(d => ({ ...d, remote: e.target.checked }))}
-                          className="accent-indigo-600 w-4 h-4" />
-                        Remote position
-                      </label>
-                    </div>
-                  </div>
-
-                  <div className="grid grid-cols-2 gap-3">
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Salary Min ($)</label>
-                      <input type="number" min={0} step={5000}
-                        value={editDraft.salary_min ?? 0}
-                        onChange={e => setEditDraft(d => ({ ...d, salary_min: parseInt(e.target.value) || 0 }))}
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                    </div>
-                    <div>
-                      <label className="block text-xs font-medium text-gray-600 mb-1">Salary Max ($)</label>
-                      <input type="number" min={0} step={5000}
-                        value={editDraft.salary_max ?? 0}
-                        onChange={e => setEditDraft(d => ({ ...d, salary_max: parseInt(e.target.value) || 0 }))}
-                        className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                    </div>
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Exp. Required (years)</label>
-                    <input type="number" min={0} max={20} step={0.5}
-                      value={editDraft.experience_years ?? 0}
-                      onChange={e => setEditDraft(d => ({ ...d, experience_years: parseFloat(e.target.value) || 0 }))}
-                      className="w-32 border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                  </div>
-
-                  <div>
-                    <label className="block text-xs font-medium text-gray-600 mb-1">Apply URL</label>
-                    <input value={editDraft.url ?? ""} onChange={e => setEditDraft(d => ({ ...d, url: e.target.value }))}
-                      placeholder="https://..."
-                      className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-300" />
-                  </div>
-
-                  <TagInput
-                    label="Required Skills"
-                    values={editDraft.skills ?? []}
-                    onChange={skills => setEditDraft(d => ({ ...d, skills }))}
-                    placeholder="react, python, typescript…"
-                  />
-
-                  <div className="flex gap-2 pt-1">
-                    <button onClick={handleSaveAndRescore} disabled={saving || rescoring}
-                      className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm px-4 py-2 rounded-md font-medium transition-colors">
-                      {saving ? "Saving…" : rescoring ? "Scoring…" : "Save & Re-score"}
-                    </button>
-                    <button onClick={handleSave} disabled={saving}
-                      className="bg-white border border-gray-300 hover:bg-gray-50 disabled:opacity-50 text-gray-700 text-sm px-4 py-2 rounded-md font-medium transition-colors">
-                      Save Only
-                    </button>
-                    <button onClick={cancelEdit}
-                      className="text-gray-500 hover:text-gray-700 text-sm px-3 py-2 transition-colors">
-                      Cancel
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                /* ── Read-only view ── */
-                <>
-                  <div className="flex gap-2 flex-wrap items-center">
-                    <ScoreBadge score={selected.fit_score} />
-                    {rescoring && <span className="text-xs text-indigo-500 animate-pulse">Scoring…</span>}
-                    {selected.remote && (
-                      <span className="bg-indigo-50 text-indigo-700 text-xs px-2 py-0.5 rounded ring-1 ring-indigo-200 font-medium">Remote</span>
-                    )}
-                    <span className="text-gray-500 text-sm">{fmtSalary(selected.salary_min, selected.salary_max)}</span>
-                    <span className="text-gray-400 text-sm">
-                      {selected.experience_years != null && selected.experience_years > 0
-                        ? `${selected.experience_years}+ yrs exp required`
-                        : "YOE not specified"}
-                    </span>
-                  </div>
-
-                  {/* Fit breakdown */}
-                  {selected.fit_breakdown && (
-                    <div className="bg-gray-50 border border-gray-200 rounded-lg p-3 space-y-2.5">
-                      <p className="text-xs text-gray-500 uppercase tracking-wide font-medium">Fit Breakdown</p>
-                      {[
-                        ["Skill Match",  selected.fit_breakdown.skill_match,      40],
-                        ["Experience",   selected.fit_breakdown.experience_match, 30],
-                        ["Role Match",   selected.fit_breakdown.role_match,       20],
-                        ["Salary",       selected.fit_breakdown.salary_match,     10],
-                      ].map(([label, val, max]) => (
-                        <div key={label as string}>
-                          <div className="flex justify-between text-xs text-gray-500 mb-1">
-                            <span>{label}</span>
-                            <span className="font-medium text-gray-700">{val}/{max}</span>
-                          </div>
-                          <div className="bg-gray-200 rounded-full h-1.5">
-                            <div
-                              className="bg-indigo-500 h-1.5 rounded-full transition-all"
-                              style={{ width: `${((val as number) / (max as number)) * 100}%` }}
-                            />
-                          </div>
-                        </div>
-                      ))}
-                      {selected.fit_breakdown.notes && (
-                        <p className="text-xs text-gray-500 pt-1 border-t border-gray-200">{selected.fit_breakdown.notes}</p>
-                      )}
-                    </div>
-                  )}
-
-                  {/* Skills */}
-                  {selected.skills.length > 0 && (
-                    <div>
-                      <p className="text-xs text-gray-500 uppercase tracking-wide font-medium mb-2">Required Skills</p>
-                      <div className="flex flex-wrap gap-1.5">
-                        {selected.skills.map(s => {
-                          const matched = selected.fit_breakdown?.matched_skills.includes(s);
-                          return (
-                            <span key={s} className={`text-xs px-2 py-0.5 rounded font-medium ${
-                              matched ? "bg-green-50 text-green-700 ring-1 ring-green-200" : "bg-gray-100 text-gray-500"
-                            }`}>{s}</span>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Actions */}
-                  <div className="flex gap-2 flex-wrap pt-1">
-                    <select
-                      value={trackStatus}
-                      onChange={e => setTrackStatus(e.target.value)}
-                      className="bg-white border border-gray-300 rounded text-sm text-gray-700 px-2 py-1.5 focus:outline-none focus:ring-2 focus:ring-indigo-300"
-                    >
-                      {["saved","applied","phone","onsite","offer","rejected"].map(s => (
-                        <option key={s} value={s}>{s}</option>
-                      ))}
-                    </select>
-                    <button onClick={() => handleTrack(selected)}
-                      className="bg-white border border-gray-300 hover:bg-gray-50 text-gray-700 text-sm px-3 py-1.5 rounded transition-colors font-medium">
-                      Track
-                    </button>
-                    <button onClick={() => handleGenerate(selected)} disabled={generating}
-                      className="bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white text-sm px-3 py-1.5 rounded transition-colors font-medium">
-                      {generating ? "Generating…" : "Generate Content"}
-                    </button>
-                  </div>
-
-                  {selected.url && !selected.url.startsWith("https://example.com") && (
-                    <a href={selected.url} target="_blank" rel="noreferrer"
-                      className="text-indigo-600 hover:text-indigo-800 text-sm font-medium block">
-                      {selected.url.includes("linkedin.com")
-                        ? "Apply on LinkedIn ↗"
-                        : "Apply on company website ↗"}
-                    </a>
-                  )}
-
-                  {/* Generated content */}
-                  {generated && (
-                    <div className="space-y-3 pt-1 border-t border-gray-200">
-                      <div className="flex items-center gap-2">
-                        <p className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Generated Content</p>
-                        <span className="text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded">via {generated.source}</span>
-                      </div>
-                      {generated.cover_letter && (
-                        <div>
-                          <p className="text-xs text-gray-500 font-medium mb-1">Cover Letter</p>
-                          <div className="bg-gray-50 border border-gray-200 rounded p-3 text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
-                            {generated.cover_letter}
-                          </div>
-                        </div>
-                      )}
-                      {generated.resume_bullets.length > 0 && (
-                        <div>
-                          <p className="text-xs text-gray-500 font-medium mb-1">Resume Bullets</p>
-                          <ul className="space-y-1">
-                            {generated.resume_bullets.map((b, i) => (
-                              <li key={i} className="text-sm text-gray-700 bg-gray-50 border border-gray-200 rounded px-3 py-2">• {b}</li>
-                            ))}
-                          </ul>
-                        </div>
-                      )}
-                    </div>
-                  )}
-                </>
-              )}
-            </div>
-          </div>
-        </>
+        <JobDrawer
+          job={selected}
+          onClose={() => setSelected(null)}
+          onRefresh={() => { load(); setSelected(null); }}
+        />
       )}
 
       {showAddModal && (
@@ -621,3 +422,6 @@ export function Jobs() {
     </div>
   );
 }
+
+// Keep old export alias for any other imports
+export { NewJobs as Jobs };

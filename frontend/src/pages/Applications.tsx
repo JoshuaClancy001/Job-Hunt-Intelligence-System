@@ -1,9 +1,10 @@
 import { useEffect, useState, Fragment } from "react";
-import { api, Application } from "../lib/api";
+import { api, Application, Job } from "../lib/api";
 import { StatusBadge } from "../components/StatusBadge";
 import { ScoreBadge } from "../components/ScoreBadge";
+import { JobDrawer } from "../components/JobDrawer";
 
-const STATUSES = ["saved", "applied", "phone", "onsite", "offer", "rejected"];
+const STATUSES = ["applied", "phone", "onsite", "offer", "rejected"];
 
 const STATUS_LABELS: Record<string, string> = {
   saved:    "Saved",
@@ -25,15 +26,21 @@ const STATUS_DOT: Record<string, string> = {
 
 interface HistoryEntry { status: string; changed_at: string; }
 
+function toIso(s: string): string {
+  if (s.includes(" ")) return s.replace(" ", "T") + "Z"; // SQLite: "YYYY-MM-DD HH:MM:SS"
+  if (!s.includes("T")) return s + "T00:00:00";          // date-only: "YYYY-MM-DD"
+  return s;                                               // already ISO
+}
+
 function fmtDate(s: string | null) {
   if (!s) return "—";
-  return new Date(s + (s.includes("T") ? "" : "T00:00:00")).toLocaleDateString("en-US", {
+  return new Date(toIso(s)).toLocaleDateString("en-US", {
     month: "short", day: "numeric", year: "numeric",
   });
 }
 
 function fmtDateTime(s: string) {
-  return new Date(s + "Z").toLocaleString("en-US", {
+  return new Date(toIso(s)).toLocaleString("en-US", {
     month: "short", day: "numeric", hour: "numeric", minute: "2-digit",
   });
 }
@@ -79,9 +86,13 @@ export function Applications() {
   const [editRejection, setEditRejection] = useState("");
   const [saving, setSaving] = useState(false);
   const [expandedId, setExpandedId] = useState<number | null>(null);
+  const [drawerJob, setDrawerJob] = useState<Job | null>(null);
 
   const load = () => api.getApplications().then(setApps).finally(() => setLoading(false));
   useEffect(() => { load(); }, []);
+
+  // Only show apps that have been actively worked on (not just saved)
+  const activeApps = apps.filter(a => a.status !== "saved");
 
   const startEdit = (app: Application) => {
     setEditId(app.id);
@@ -106,20 +117,26 @@ export function Applications() {
   const toggleHistory = (id: number) =>
     setExpandedId(prev => prev === id ? null : id);
 
+  const openDrawer = async (app: Application) => {
+    setEditId(null);
+    const job = await api.getJob(app.job_id);
+    setDrawerJob(job);
+  };
+
   if (loading) return <p className="text-gray-400 animate-pulse">Loading...</p>;
 
   return (
     <div className="space-y-4">
       <div className="flex items-center justify-between">
         <h2 className="text-xl font-semibold text-gray-900">
-          Applications <span className="text-gray-400 text-base font-normal">({apps.length})</span>
+          Applications <span className="text-gray-400 text-base font-normal">({activeApps.length})</span>
         </h2>
       </div>
 
-      {apps.length === 0 ? (
+      {activeApps.length === 0 ? (
         <div className="bg-white border border-gray-200 rounded-lg shadow-sm p-8 text-center text-gray-500">
-          <p className="font-medium">No applications tracked yet.</p>
-          <p className="text-sm mt-1 text-gray-400">Go to the Jobs page and click "Track Application" on any job.</p>
+          <p className="font-medium">No applications yet.</p>
+          <p className="text-sm mt-1 text-gray-400">Save a job from New Jobs, then track it as <strong>applied</strong> to see it here.</p>
         </div>
       ) : (
         <div className="bg-white border border-gray-200 rounded-lg shadow-sm overflow-hidden">
@@ -138,7 +155,7 @@ export function Applications() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {apps.map(app => (
+                {activeApps.map(app => (
                   <Fragment key={app.id}>
                     {editId === app.id ? (
                       <tr className="bg-indigo-50/40">
@@ -159,7 +176,7 @@ export function Applications() {
                                   {STATUSES.map(s => <option key={s} value={s}>{STATUS_LABELS[s]}</option>)}
                                 </select>
                               </div>
-                              {(editStatus === "rejected") && (
+                              {editStatus === "rejected" && (
                                 <div className="flex flex-col gap-1 min-w-48">
                                   <label className="text-xs text-gray-500">Rejection Reason</label>
                                   <input
@@ -194,12 +211,17 @@ export function Applications() {
                         </td>
                       </tr>
                     ) : (
-                      <tr className="hover:bg-gray-50 transition-colors">
+                      <tr
+                        className="hover:bg-gray-50 transition-colors cursor-pointer"
+                        onClick={() => openDrawer(app)}
+                      >
                         <td className="px-4 py-3">
                           <p className="text-gray-800 font-medium leading-tight">{app.company}</p>
                         </td>
                         <td className="px-4 py-3 text-gray-600">{app.title}</td>
-                        <td className="px-4 py-3"><StatusBadge status={app.status} /></td>
+                        <td className="px-4 py-3" onClick={e => e.stopPropagation()}>
+                          <StatusBadge status={app.status} />
+                        </td>
                         <td className="px-4 py-3 text-right text-gray-500 text-xs tabular-nums">
                           {fmtSalary(app.salary_min, app.salary_max)}
                         </td>
@@ -212,7 +234,7 @@ export function Applications() {
                         <td className="px-4 py-3 text-gray-400 text-xs">
                           {app.rejection_reason || (app.status === "rejected" ? <span className="italic">—</span> : "")}
                         </td>
-                        <td className="px-4 py-3 text-right">
+                        <td className="px-4 py-3 text-right" onClick={e => e.stopPropagation()}>
                           <div className="flex justify-end items-center gap-3">
                             {app.url && (
                               <a href={app.url} target="_blank" rel="noreferrer"
@@ -254,6 +276,14 @@ export function Applications() {
             </table>
           </div>
         </div>
+      )}
+
+      {drawerJob && (
+        <JobDrawer
+          job={drawerJob}
+          onClose={() => setDrawerJob(null)}
+          onRefresh={() => { load(); setDrawerJob(null); }}
+        />
       )}
     </div>
   );

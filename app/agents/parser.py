@@ -36,21 +36,41 @@ SKILLS = sorted([
 ], key=len, reverse=True)
 
 _RE_REMOTE = re.compile(
-    r"\b(remote|work from home|wfh|fully remote|distributed team)\b", re.I
+    r"\b(fully remote|100%\s*remote|work from home|wfh|distributed team|remote.first|remote only)\b", re.I
+)
+_RE_HYBRID = re.compile(
+    r"\b(hybrid|in.office\s+\d+\s+days?|\d+\s+days?\s+(?:per\s+week\s+)?(?:in|at)\s+(?:the\s+)?office"
+    r"|required\s+to\s+(?:be\s+in|come\s+(?:in)?to)\s+(?:the\s+)?office"
+    r"|on.?site|onsite)\b",
+    re.I,
 )
 _RE_EXP = [
-    re.compile(r"(\d+)\+?\s*years?\s+of\s+(?:professional\s+)?experience", re.I),
-    re.compile(r"(\d+)\+?\s*years?\s+(?:of\s+)?(?:relevant\s+)?experience", re.I),
-    re.compile(r"(\d+)\s*[-–]\s*(\d+)\s*years?\s+(?:of\s+)?experience", re.I),
-    re.compile(r"experience[:\s]+(\d+)\+?\s*years?", re.I),
-    re.compile(r"minimum\s+(\d+)\s+years?", re.I),
+    # "2–4 years of professional software development experience" (range + words before experience)
+    re.compile(r"(\d+)\s*[-–]\s*\d+\s*years?\s+of\s+(?:\w+\s+){0,4}experience", re.I),
+    # "2 to 4 years of software engineering experience"
+    re.compile(r"(\d+)\s+to\s+\d+\s*years?\s+of\s+(?:\w+\s+){0,4}experience", re.I),
+    # "2+ years of professional experience" / "2 years of experience"
+    re.compile(r"(\d+)\+?\s*years?\s+of\s+(?:\w+\s+){0,3}experience", re.I),
+    # "2+ years working/building/developing/engineering"
+    re.compile(r"(\d+)\+?\s*years?\s+(?:working|building|developing|shipping|engineering|coding|programming)", re.I),
+    # "experience: 2+ years" / "experience of 2 years"
+    re.compile(r"experience[:\sof]+(\d+)\+?\s*years?", re.I),
+    # "minimum 2 years" / "at least 2 years"
+    re.compile(r"(?:minimum|at\s+least)\s+(\d+)\s*years?", re.I),
 ]
+_SEP = r"(?:\s*[-–]+\s*|\s+to\s+)"  # separators: hyphen, em-dash, or "to"
+
 _RE_SALARY = [
-    re.compile(
-        r"\$\s*(\d{1,3}(?:,\d{3})*|\d+)[kK]?\s*[-–to]+\s*\$?\s*(\d{1,3}(?:,\d{3})*|\d+)[kK]?",
-        re.I,
-    ),
-    re.compile(r"(\d{1,3}(?:,\d{3})+)\s*(?:USD|usd|/year|/yr|annually)", re.I),
+    # Xk–Yk or $Xk–$Yk (both k, safe — won't match experience ranges)
+    re.compile(r"\$?\s*(\d+)\s*[kK]" + _SEP + r"\$?\s*(\d+)\s*[kK]", re.I),
+    # X,XXX–Y,YYY or $X,XXX–$Y,YYY (both with commas)
+    re.compile(r"\$?\s*(\d{1,3}(?:,\d{3})+)" + _SEP + r"\$?\s*(\d{1,3}(?:,\d{3})+)", re.I),
+    # $X–$Y ($ required to avoid matching experience ranges like "3–5 years")
+    re.compile(r"\$\s*(\d{1,3}(?:,\d{3})*|\d+)[kK]?" + _SEP + r"\$?\s*(\d{1,3}(?:,\d{3})*|\d+)[kK]?", re.I),
+    # Single $Xk value
+    re.compile(r"\$\s*(\d+)\s*[kK]\b", re.I),
+    # X,XXX /yr pattern
+    re.compile(r"(\d{1,3}(?:,\d{3})+)\s*(?:USD|/year|/yr|annually)", re.I),
 ]
 
 
@@ -61,6 +81,10 @@ def run(conn: sqlite3.Connection, job_id: int) -> dict:
         return {}
     text = (job.get("raw_description") or "") + " " + (job.get("title") or "")
     parsed = parse_text(text)
+    # Preserve salary already set on the job (e.g. from discovery API) if parser found nothing
+    if not parsed.get("salary_min") and not parsed.get("salary_max"):
+        parsed["salary_min"] = job.get("salary_min") or 0
+        parsed["salary_max"] = job.get("salary_max") or 0
     update_job_parsed_fields(conn, job_id, parsed)
     return parsed
 
@@ -80,12 +104,15 @@ def parse_text(text: str, title: str = "") -> dict:
 
 
 def _parse_regex(text: str) -> dict:
+    is_hybrid = bool(_RE_HYBRID.search(text))
+    is_remote = bool(_RE_REMOTE.search(text)) and not is_hybrid
     return {
         "skills": _extract_skills(text),
         "experience_years": _extract_experience(text),
         "salary_min": _extract_salary(text)[0],
         "salary_max": _extract_salary(text)[1],
-        "remote": bool(_RE_REMOTE.search(text)),
+        "remote": is_remote,
+        "hybrid": is_hybrid if is_hybrid else None,
     }
 
 
@@ -132,13 +159,15 @@ def _extract_salary(text: str) -> tuple[int, int]:
 def _parse_ollama(text: str, title: str = "") -> Optional[dict]:
     prompt = f"""Extract structured information from this job posting.
 Return ONLY valid JSON with these exact keys:
-{{"skills": ["list", "of", "required", "skills"], "experience_years": 3, "salary_min": 120000, "salary_max": 160000, "remote": true}}
+{{"skills": ["skill1", "skill2"], "experience_years": null, "salary_min": 0, "salary_max": 0, "remote": true, "hybrid": false, "relevant": true}}
 
 Rules:
 - skills: list every technical skill, tool, or language explicitly mentioned.
-- experience_years: ONLY include a number if the posting EXPLICITLY states a required number of years (e.g. "3+ years", "minimum 5 years"). Do NOT infer from words like "senior" or "junior". Use null if no specific number is stated.
+- experience_years: Extract the MINIMUM years of experience required. Look for ANY of these phrasings: "X years experience", "X+ years experience", "X years of experience", "X–Y years of experience" (use X), "X to Y years" (use X), "X or more years", "at least X years", "minimum X years", "X years in software/backend/etc", "hands-on experience (X years)", "X yrs experience". Use the lowest number when a range is given. Use null ONLY if no number of years is mentioned anywhere in the posting. Do NOT infer from words like "senior" or "junior" alone.
 - salary_min / salary_max: extract only if dollar amounts appear. Use 0 if absent.
-- remote: true only if the posting says remote, WFH, or distributed. false otherwise.
+- remote: true only if the posting is FULLY remote (100% remote, WFH, distributed, no required office attendance). false if hybrid or on-site.
+- hybrid: true if the posting requires ANY in-office days (e.g. "hybrid", "2 days in office", "on-site", "must be in office"). false if fully remote or fully on-site with no remote option. null if unspecified.
+- relevant: true if this is primarily a software engineering role (building web/mobile apps, APIs, product features, frontend/backend/full-stack development). false if it is primarily data engineering (ETL, Spark, Hadoop, data pipelines), data science, ML/AI research, pure DevOps/infrastructure, QA/testing only, or requires a specialized non-SWE background. When in doubt, use true.
 - No explanation. No markdown. Only the JSON object.
 
 Job Title: {title}
@@ -159,6 +188,11 @@ Description:
             # Normalize: null/0/missing all mean "not specified" for experience
             if not parsed.get("experience_years"):
                 parsed["experience_years"] = None
+            # Normalize relevant: default to None (unknown) if not returned
+            if "relevant" not in parsed:
+                parsed["relevant"] = None
+            # Normalize skills to lowercase so matching is always case-insensitive
+            parsed["skills"] = [s.lower() for s in parsed.get("skills", []) if isinstance(s, str)]
             return parsed
     except Exception:
         pass

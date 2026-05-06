@@ -15,6 +15,8 @@ export interface Job {
   fit_breakdown: FitBreakdown | null;
   scraped_at: string;
   parsed_at: string | null;
+  application_id?: number | null;
+  application_status?: string | null;
 }
 
 export interface FitBreakdown {
@@ -117,6 +119,9 @@ export const api = {
     }),
   getApplicationHistory: (id: number) =>
     req<{ status: string; changed_at: string }[]>(`/applications/${id}/history`),
+
+  discoverJobs: (source?: string) => req<{ fetched: number; new: number; sources: string[] }>(`/jobs/discover${source ? `?source=${source}` : ""}`, { method: "POST" }),
+  discoveryStatus: () => req<{ last_run_at: string | null; last_result: { new: number; sources: string[] } | null; next_run_at: string | null }>("/jobs/discovery-status"),
 
   getInsights: () => req<InsightReport>("/insights"),
   getProfile: () => req<Record<string, unknown>>("/profile"),

@@ -6,3 +6,5 @@ pydantic==2.7.1
 requests==2.32.2
 beautifulsoup4==4.12.3
 lxml==5.2.1
+browser-cookie3==0.19.1
+playwright>=1.44.0

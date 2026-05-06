@@ -10,6 +10,7 @@ Or:        uvicorn main:app --reload --port 8080
 Docs at:   http://localhost:8080/docs
 """
 
+from datetime import datetime, timezone
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -20,7 +21,7 @@ from pathlib import Path
 from app.db.database import (
     get_connection, get_all_jobs, get_job_by_id, get_or_create_profile,
     save_profile, get_all_applications, insert_application,
-    update_application_status, get_application_for_job, delete_job,
+    update_application_status, get_application_for_job, delete_job, dismiss_job,
     get_status_history, update_job,
 )
 
@@ -36,6 +37,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+_last_discovery: dict = {"at": None, "result": None}
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +170,7 @@ def delete_job_endpoint(job_id: int):
     conn = get_connection()
     if not get_job_by_id(conn, job_id):
         raise HTTPException(404, "Job not found")
-    delete_job(conn, job_id)
+    dismiss_job(conn, job_id)
     return {"deleted": job_id}
 
 
@@ -217,6 +220,25 @@ def update_application(app_id: int, req: ApplicationUpdate):
 @app.get("/applications/{app_id}/history")
 def get_application_history(app_id: int):
     return get_status_history(get_connection(), app_id)
+
+
+@app.post("/jobs/discover")
+def discover_jobs(source: str | None = None):
+    """Manually trigger job discovery. Pass ?source=linkedin to limit to one source."""
+    from app.agents.discovery import run as discover, ALL_SOURCES
+    sources = [source] if source else None
+    result = discover(get_connection(), sources=sources)
+    _last_discovery["at"] = datetime.now(timezone.utc).isoformat()
+    _last_discovery["result"] = result
+    return result
+
+@app.get("/jobs/discovery-status")
+def discovery_status():
+    return {
+        "last_run_at": _last_discovery["at"],
+        "last_result": _last_discovery["result"],
+        "next_run_at": None,
+    }
 
 
 @app.get("/insights")

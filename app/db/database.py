@@ -69,6 +69,7 @@ def _create_tables(conn: sqlite3.Connection) -> None:
     # Migrations — safe to re-run; ALTER TABLE fails silently if column exists
     for migration in [
         "ALTER TABLE applications ADD COLUMN rejection_reason TEXT DEFAULT ''",
+        "ALTER TABLE jobs ADD COLUMN relevant INTEGER DEFAULT NULL",
     ]:
         try:
             conn.execute(migration)
@@ -111,6 +112,11 @@ def delete_job(conn: sqlite3.Connection, job_id: int) -> None:
     conn.execute("DELETE FROM jobs WHERE id=?", (job_id,))
     conn.commit()
 
+def dismiss_job(conn: sqlite3.Connection, job_id: int) -> None:
+    """Soft-delete: marks dismissed so it never reappears in UI or discovery."""
+    conn.execute("UPDATE jobs SET dismissed_at=datetime('now') WHERE id=?", (job_id,))
+    conn.commit()
+
 
 def update_job_scores(conn: sqlite3.Connection, job_id: int,
                       fit_score: float, fit_breakdown: dict) -> None:
@@ -125,19 +131,25 @@ def update_job_parsed_fields(conn: sqlite3.Connection, job_id: int, fields: dict
     skills = fields.get("skills", [])
     if not isinstance(skills, str):
         skills = json.dumps(skills)
+    relevant = fields.get("relevant")
+    relevant_val = None if relevant is None else (1 if relevant else 0)
+    hybrid = fields.get("hybrid")
+    hybrid_val = None if hybrid is None else (1 if hybrid else 0)
     conn.execute(
         """
         UPDATE jobs
         SET skills=?, experience_years=?, salary_min=?, salary_max=?, remote=?,
-            parsed_at=datetime('now')
+            relevant=?, hybrid=?, parsed_at=datetime('now')
         WHERE id=?
         """,
         (
             skills,
-            fields.get("experience_years"),  # None stored as NULL = "not specified"
+            fields.get("experience_years"),
             fields.get("salary_min", 0),
             fields.get("salary_max", 0),
             1 if fields.get("remote") else 0,
+            relevant_val,
+            hybrid_val,
             job_id,
         ),
     )
@@ -172,12 +184,24 @@ def update_job(conn: sqlite3.Connection, job_id: int, fields: dict) -> None:
 
 
 def get_all_jobs(conn: sqlite3.Connection) -> list[dict]:
-    rows = conn.execute("SELECT * FROM jobs ORDER BY fit_score DESC NULLS LAST, id DESC").fetchall()
+    rows = conn.execute("""
+        SELECT j.*,
+               (SELECT id     FROM applications WHERE job_id = j.id ORDER BY id DESC LIMIT 1) AS application_id,
+               (SELECT status FROM applications WHERE job_id = j.id ORDER BY id DESC LIMIT 1) AS application_status
+        FROM jobs j
+        WHERE j.dismissed_at IS NULL
+        ORDER BY j.fit_score DESC NULLS LAST, j.id DESC
+    """).fetchall()
     return [_deserialize_row(r) for r in rows]
 
 
 def get_job_by_id(conn: sqlite3.Connection, job_id: int) -> Optional[dict]:
-    row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+    row = conn.execute("""
+        SELECT j.*,
+               (SELECT id     FROM applications WHERE job_id = j.id ORDER BY id DESC LIMIT 1) AS application_id,
+               (SELECT status FROM applications WHERE job_id = j.id ORDER BY id DESC LIMIT 1) AS application_status
+        FROM jobs j WHERE j.id=?
+    """, (job_id,)).fetchone()
     return _deserialize_row(row) if row else None
 
 
@@ -186,10 +210,14 @@ def get_job_by_id(conn: sqlite3.Connection, job_id: int) -> Optional[dict]:
 # ---------------------------------------------------------------------------
 
 def insert_application(conn: sqlite3.Connection, app: dict) -> int:
+    from datetime import datetime, timezone
     bullets = app.get("resume_bullets", [])
     if not isinstance(bullets, str):
         bullets = json.dumps(bullets)
     status = app.get("status", "saved")
+    applied_at = app.get("applied_at")
+    if applied_at is None and status == "applied":
+        applied_at = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     cur = conn.execute(
         """
         INSERT INTO applications
@@ -199,7 +227,7 @@ def insert_application(conn: sqlite3.Connection, app: dict) -> int:
         (
             app["job_id"],
             status,
-            app.get("applied_at"),
+            applied_at,
             app.get("notes", ""),
             app.get("cover_letter", ""),
             bullets,
@@ -330,4 +358,8 @@ def _deserialize_row(row) -> dict:
                 d[key] = []
     if "remote" in d:
         d["remote"] = bool(d["remote"])
+    if "relevant" in d and d["relevant"] is not None:
+        d["relevant"] = bool(d["relevant"])
+    if "hybrid" in d and d["hybrid"] is not None:
+        d["hybrid"] = bool(d["hybrid"])
     return d

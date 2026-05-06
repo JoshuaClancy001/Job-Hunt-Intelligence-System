@@ -35,7 +35,29 @@ export function Dashboard() {
     </div>
   );
 
+  const ls = (key: string, fallback: unknown) => {
+    try { const v = localStorage.getItem(key); return v !== null ? JSON.parse(v) : fallback; } catch { return fallback; }
+  };
+  const SENIOR_RE = /\b(senior|sr\.?|principal|staff|lead|director|vp|vice\s+president|head\s+of|manager|architect|distinguished|fellow)\b/i;
+  const minScore = ls("nj_minscore", 0) as number;
+  const locationFilter = ls("nj_location", "remote_utah") as string;
+  const hideSenior = ls("nj_hidesenior", true) as boolean;
+  const isUtah = (j: Job) => {
+    const loc = (j.location || "").toLowerCase();
+    return loc.includes("utah") || loc.includes(" ut") || loc.includes(",ut") ||
+           loc.includes("provo") || loc.includes("salt lake") || loc.includes("orem");
+  };
+
   const scored = jobs.filter(j => j.fit_score !== null);
+  const newJobs = jobs.filter(j => {
+    if (j.application_status) return false;
+    if ((j.fit_score ?? 0) < minScore) return false;
+    if (locationFilter === "remote" && !j.remote) return false;
+    if (locationFilter === "remote_utah" && !j.remote && !isUtah(j)) return false;
+    if (hideSenior && SENIOR_RE.test(j.title)) return false;
+    return true;
+  });
+  const applied = jobs.filter(j => !!j.application_status);
   const avgScore = scored.length
     ? Math.round(scored.reduce((s, j) => s + (j.fit_score ?? 0), 0) / scored.length)
     : 0;
@@ -47,7 +69,7 @@ export function Dashboard() {
 
       {/* Stat cards */}
       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
-        <StatCard label="Total Jobs" value={jobs.length} sub={`${scored.length} scored`} />
+        <StatCard label="Total Jobs" value={newJobs.length + applied.length} sub={`${newJobs.length} new, ${applied.length} applied`} />
         <StatCard label="Avg Fit Score" value={avgScore || "—"} sub="across scored jobs" />
         <StatCard label="Applied" value={insights?.total_applied ?? 0} sub="applications sent" />
         <StatCard

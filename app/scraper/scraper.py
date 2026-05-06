@@ -38,6 +38,8 @@ def scrape_url(url: str) -> dict:
 
     if "linkedin.com" in host:
         result = _scrape_linkedin(url)
+    elif "indeed.com" in host:
+        result = _scrape_indeed(url)
     elif "greenhouse.io" in host:
         result = _scrape_greenhouse(url)
     elif "lever.co" in host:
@@ -46,6 +48,8 @@ def scrape_url(url: str) -> dict:
         result = _scrape_ashby(url)
     elif "myworkdayjobs.com" in host:
         result = _scrape_workday(url)
+    elif "ziprecruiter.com" in host:
+        result = _scrape_ziprecruiter(url)
     else:
         result = _scrape_generic(url)
 
@@ -357,6 +361,180 @@ def _scrape_workday(url: str) -> dict:
     company = host.split(".")[0].replace("-", " ").title()
     return {"title": title or "Unknown", "company": company, "location": location or "",
             "raw_description": description}
+
+
+# ---------------------------------------------------------------------------
+# Indeed  (indeed.com/viewjob?jk=... or indeed.com/jobs/...)
+# ---------------------------------------------------------------------------
+
+def _scrape_indeed(url: str) -> dict:
+    """Scrape Indeed job pages using Playwright + cookies to bypass bot detection."""
+    cookies = _load_indeed_cookies()
+    html = _fetch_playwright_with_cookies(url, "indeed.com", cookies)
+    if not html:
+        return _fallback(url)
+    soup = _make_soup(html)
+
+    title = (
+        _text(soup, 'h1[data-testid="jobsearch-JobInfoHeader-title"]')
+        or _text(soup, ".jobsearch-JobInfoHeader-title")
+        or _text(soup, "h1")
+    )
+
+    company = (
+        _text(soup, '[data-testid="inlineHeader-companyName"] a')
+        or _text(soup, '[data-testid="inlineHeader-companyName"]')
+        or _text(soup, ".jobsearch-InlineCompanyRating a")
+        or _text(soup, ".jobsearch-CompanyInfoWithoutHeaderImage a")
+    )
+
+    location = (
+        _text(soup, '[data-testid="job-location"]')
+        or _text(soup, ".jobsearch-JobInfoHeader-subtitle [data-testid]")
+        or _text(soup, ".jobsearch-JobInfoHeader-subtitle")
+    )
+    remote = "remote" in (location or "").lower()
+
+    desc_el = (
+        soup.select_one('[data-testid="jobDescriptionText"]')
+        or soup.select_one("#jobDescriptionText")
+        or soup.select_one(".jobsearch-jobDescriptionText")
+        or soup.select_one("main")
+    )
+    description = desc_el.get_text("\n", strip=True)[:10000] if desc_el else ""
+
+    if not title or title == "Unknown":
+        return _fallback(url)
+
+    return {
+        "title": title,
+        "company": company or _company_from_url(url),
+        "location": location or "",
+        "raw_description": description,
+        "remote": remote,
+    }
+
+
+def _load_indeed_cookies() -> list[dict]:
+    """Load Indeed cookies from cookies.json and convert to Playwright format."""
+    try:
+        from pathlib import Path
+        cookies_path = Path(__file__).parent.parent.parent / "cookies.json"
+        if not cookies_path.exists():
+            return []
+        with open(cookies_path) as f:
+            data = json.load(f)
+        raw = data.get("indeed", "")
+        if not raw:
+            return []
+        cookies = []
+        for part in raw.split(";"):
+            part = part.strip()
+            if "=" in part:
+                name, _, value = part.partition("=")
+                cookies.append({
+                    "name": name.strip(),
+                    "value": value.strip(),
+                    "domain": ".indeed.com",
+                    "path": "/",
+                })
+        return cookies
+    except Exception:
+        return []
+
+
+def _fetch_playwright_with_cookies(url: str, domain: str, cookies: list[dict]) -> str | None:
+    """Fetch a page with Playwright, injecting cookies before navigation."""
+    try:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as pw:
+            browser = pw.chromium.launch(headless=True)
+            ctx = browser.new_context(
+                extra_http_headers={"Accept-Language": "en-US,en;q=0.9"},
+                user_agent=(
+                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124 Safari/537.36"
+                ),
+            )
+            if cookies:
+                ctx.add_cookies(cookies)
+            page = ctx.new_page()
+            page.goto(url, timeout=30000, wait_until="domcontentloaded")
+            page.wait_for_timeout(2500)
+            html = page.content()
+            browser.close()
+            return html
+    except Exception:
+        return None
+
+
+# ---------------------------------------------------------------------------
+# ZipRecruiter  (all URL patterns including /candidate/saved-jobs?lk=...)
+# ---------------------------------------------------------------------------
+
+def _scrape_ziprecruiter(url: str) -> dict:
+    # ZipRecruiter blocks plain requests — Playwright handles bot detection
+    html = _fetch_playwright(url) or ""
+    if not html:
+        return _fallback(url)
+    soup = _make_soup(html)
+
+    # JSON-LD is the most reliable — ZipRecruiter includes JobPosting schema on detail pages
+    ld = _extract_json_ld(soup)
+    if ld and ld.get("title"):
+        loc_raw = ld.get("jobLocation") or {}
+        if isinstance(loc_raw, list):
+            loc_raw = loc_raw[0] if loc_raw else {}
+        addr = loc_raw.get("address") or {}
+        location = addr.get("addressLocality", "") or addr.get("addressRegion", "")
+        company = (ld.get("hiringOrganization") or {}).get("name", "") or _company_from_url(url)
+        desc_soup = BeautifulSoup(ld.get("description", ""), "html.parser")
+        description = desc_soup.get_text("\n", strip=True)[:10000] or _best_description(soup)
+        remote = "remote" in (location + " " + ld.get("jobLocationType", "")).lower()
+        return {
+            "title": ld["title"],
+            "company": company,
+            "location": location,
+            "raw_description": description,
+            "remote": remote,
+        }
+
+    # CSS selector fallback
+    title = (
+        _text(soup, "h2.title")
+        or _text(soup, '[class*="job_title"]')
+        or _text(soup, '[class*="jobTitle"]')
+        or _text(soup, "h1")
+    )
+    company = (
+        _text(soup, '[class*="hiring_company"]')
+        or _text(soup, '[class*="company_name"]')
+        or _text(soup, '[class*="companyName"]')
+        or _company_from_url(url)
+    )
+    location = (
+        _text(soup, '[class*="location"]')
+        or _text(soup, '[class*="job_location"]')
+    )
+    remote = "remote" in (location or "").lower()
+    desc_el = (
+        soup.select_one("#job_desc")
+        or soup.select_one('[class*="jobDescription"]')
+        or soup.select_one('[class*="job_description"]')
+        or soup.select_one("main")
+    )
+    description = desc_el.get_text("\n", strip=True)[:10000] if desc_el else _best_description(soup)
+
+    if not title or title == "Unknown":
+        return _fallback(url)
+
+    return {
+        "title": title,
+        "company": company,
+        "location": location or "",
+        "raw_description": description,
+        "remote": remote,
+    }
 
 
 # ---------------------------------------------------------------------------

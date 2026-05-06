@@ -16,3 +16,4 @@ frontend/dist/
 
 .env
 .DS_Store
+cookies.json
